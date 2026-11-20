@@ -7,6 +7,7 @@ export interface Message {
   status: "pending" | "completed" | "failed" | "cancelled";
   tone: Tone;
   requestId: string;
+  regenerationRequestId?: string;
 }
 export interface Conversation {
   _id: string;
@@ -17,6 +18,10 @@ export interface Conversation {
   updatedAt: string;
 }
 export type ConversationSummary = Omit<Conversation, "messages">;
+export interface SearchResult extends ConversationSummary {
+  messageId: string | null;
+  snippet: string;
+}
 export interface AppConfig {
   mongoUri: string;
   openaiApiKey: string;

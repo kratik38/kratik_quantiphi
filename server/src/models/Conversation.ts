@@ -11,6 +11,7 @@ const messageSchema = new Schema({
   },
   tone: { type: String, enum: tones, required: true },
   requestId: { type: String, required: true },
+  regenerationRequestId: { type: String },
 });
 const conversationSchema = new Schema(
   {

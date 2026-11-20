@@ -22,3 +22,19 @@ export const streamSchema = z
   })
   .strict();
 export type StreamInput = z.infer<typeof streamSchema>;
+
+export const regenerateSchema = z
+  .object({
+    conversationId: idSchema,
+    messageId: idSchema,
+    tone: toneSchema,
+    requestId: z.string().uuid().optional(),
+  })
+  .strict();
+export type RegenerateInput = Omit<
+  z.infer<typeof regenerateSchema>,
+  "requestId"
+> & { requestId: string };
+export const searchSchema = z
+  .object({ q: z.string().trim().min(1).max(100) })
+  .strict();

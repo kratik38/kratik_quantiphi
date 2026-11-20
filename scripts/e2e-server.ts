@@ -12,15 +12,27 @@ const mongo = await MongoMemoryServer.create({
   },
 });
 await mongoose.connect(mongo.getUri());
+const attempts = new Map<string, number>();
 const ai: AIService = {
   async *generate(messages, tone, signal) {
     const prompt = messages.at(-1)?.content || "";
+    const messageId = messages.at(-1)?._id || prompt;
+    const attempt = (attempts.get(messageId) || 0) + 1;
+    attempts.set(messageId, attempt);
+    if (prompt.includes("Regenerate failure") && attempt > 1)
+      throw new Error("Controlled regeneration failure");
     if (prompt.includes("trigger-error"))
       throw new Error("Controlled provider failure");
-    const answer = `**${tone}** response. Context contains ${messages.length} messages.\n\nA streamed explanation with \`safe code\` and a helpful conclusion.`;
+    const answer = `**${tone}** response. Context contains ${messages.length} messages.\n\nA streamed explanation with \`safe code\` and a helpful conclusion. Revision ${attempt}.`;
     for (const char of answer) {
       await new Promise((resolve) =>
-        setTimeout(resolve, prompt.includes("slow") ? 80 : 5),
+        setTimeout(
+          resolve,
+          prompt.includes("slow") ||
+            (prompt.includes("Regenerate cancel") && attempt > 1)
+            ? 80
+            : 5,
+        ),
       );
       if (signal.aborted) throw new Error("Aborted");
       yield char;
@@ -33,7 +45,7 @@ const server = createApp({
     mongoUri: mongo.getUri(),
     openaiApiKey: "test-only",
     openaiModel: "controlled-test",
-    clientOrigin: "http://localhost:5173",
+    clientOrigin: "http://localhost:5187",
     port: 5017,
   },
 }).listen(5017, "127.0.0.1");

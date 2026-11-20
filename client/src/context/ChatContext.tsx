@@ -6,8 +6,15 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, streamChat } from "../services/api";
-import type { Conversation, Summary, Tone, Message } from "../types";
+import { api } from "../services/api";
+import { streamProgressively } from "../services/progressiveStream";
+import type {
+  Conversation,
+  Summary,
+  Tone,
+  Message,
+  RegenerationPreview,
+} from "../types";
 interface ChatState {
   conversations: Summary[];
   active: Conversation | null;
@@ -21,7 +28,10 @@ interface ChatState {
   setError: (value: string) => void;
   setSidebarOpen: (value: boolean) => void;
   refresh: () => Promise<void>;
-  select: (id: string) => Promise<void>;
+  select: (id: string, messageId?: string) => Promise<void>;
+  highlightedMessage: { id: string; navigation: number } | null;
+  regeneration: RegenerationPreview | null;
+  regenerate: (messageId: string) => Promise<void>;
   newChat: () => void;
   remove: (id: string) => Promise<void>;
   setTone: (tone: Tone) => Promise<void>;
@@ -37,6 +47,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
+  const [regeneration, setRegeneration] = useState<RegenerationPreview | null>(
+    null,
+  );
+  const [highlightedMessage, setHighlightedMessage] = useState<{
+    id: string;
+    navigation: number;
+  } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => window.innerWidth >= 768,
   );
@@ -64,9 +81,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     controller.current = null;
     busy.current = false;
     setStreaming(false);
+    setRegeneration(null);
+    setHighlightedMessage(null);
     setLoading(false);
   };
-  const select = async (id: string) => {
+  const select = async (id: string, messageId?: string) => {
     resetRequest();
     const version = generation.current;
     setError("");
@@ -79,6 +98,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       );
       if (generation.current !== version) return;
       setActive(conversation);
+      if (messageId)
+        setHighlightedMessage({ id: messageId, navigation: version });
       changeTone(conversation.tone);
       localStorage.setItem("activeConversation", id);
     } catch (e) {
@@ -151,29 +172,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     const abort = new AbortController();
     controller.current = abort;
     let conversation = active;
-    let received = "",
-      shown = "",
-      finalConversation: Conversation | undefined;
-    const updateText = () => {
-      if (version !== generation.current || shown === received) return;
-      // Drain larger bursts quickly so animation never adds a long wait to the network stream.
-      shown = received.slice(
-        0,
-        shown.length +
-          Math.max(1, Math.ceil((received.length - shown.length) / 3)),
-      );
-      setActive((current) =>
-        current
-          ? {
-              ...current,
-              messages: current.messages.map((m) =>
-                m._id === "streaming" ? { ...m, content: shown } : m,
-              ),
-            }
-          : current,
-      );
-    };
-    const animation = window.setInterval(updateText, 16);
+    let finalConversation: Conversation | undefined;
     try {
       if (!conversation) {
         const timestamp = new Date().toISOString();
@@ -244,9 +243,22 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           },
         ],
       });
-      await streamChat(
+      finalConversation = await streamProgressively(
         { conversationId, message: text, tone, requestId },
         abort.signal,
+        (content) => {
+          if (version !== generation.current) return;
+          setActive((current) =>
+            current
+              ? {
+                  ...current,
+                  messages: current.messages.map((m) =>
+                    m._id === "streaming" ? { ...m, content } : m,
+                  ),
+                }
+              : current,
+          );
+        },
         ({ event, data }) => {
           if (version !== generation.current) return;
           if (event === "start" && data.userMessage)
@@ -262,10 +274,6 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                   }
                 : current,
             );
-          if (event === "delta")
-            received += String(data.text ?? data.delta ?? "");
-          if (event === "done")
-            finalConversation = data.conversation as Conversation | undefined;
         },
       );
       if (version !== generation.current) return;
@@ -308,10 +316,75 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         void refresh().catch(() => {});
       }
     } finally {
-      clearInterval(animation);
       if (version === generation.current) {
         busy.current = false;
         setStreaming(false);
+        controller.current = null;
+      }
+    }
+  };
+  const regenerate = async (messageId: string) => {
+    if (!active || busy.current || loading) return;
+    const latest = [...active.messages]
+      .reverse()
+      .find((m) => m.role === "assistant" && m.status === "completed");
+    if (latest?._id !== messageId) return;
+    busy.current = true;
+    setStreaming(true);
+    setError("");
+    setHighlightedMessage(null);
+    const version = ++generation.current;
+    const abort = new AbortController();
+    controller.current = abort;
+    const conversationId = active._id;
+    setRegeneration({
+      messageId,
+      content: "",
+      tone,
+      timestamp: new Date().toISOString(),
+    });
+    try {
+      let conversation = await streamProgressively(
+        { conversationId, messageId, tone },
+        abort.signal,
+        (content) => {
+          if (version === generation.current)
+            setRegeneration((current) =>
+              current ? { ...current, content } : current,
+            );
+        },
+        () => {},
+        "/chat/regenerate",
+      );
+      if (version !== generation.current) return;
+      if (!conversation)
+        ({ conversation } = await api<{ conversation: Conversation }>(
+          `/conversations/${conversationId}`,
+        ));
+      if (version !== generation.current) return;
+      setActive(conversation);
+      void refresh().catch((e) => setError((e as Error).message));
+    } catch (e) {
+      if (version !== generation.current) return;
+      setError(
+        abort.signal.aborted
+          ? "Regeneration stopped. Your original response is preserved."
+          : `Regeneration failed. ${(e as Error).message}`,
+      );
+      // A lost final event may follow a successful database commit; reconcile canonical state.
+      try {
+        const result = await api<{ conversation: Conversation }>(
+          `/conversations/${conversationId}`,
+        );
+        if (version === generation.current) setActive(result.conversation);
+      } catch {
+        /* Keep the original messages if reloading is unavailable. */
+      }
+    } finally {
+      if (version === generation.current) {
+        busy.current = false;
+        setStreaming(false);
+        setRegeneration(null);
         controller.current = null;
       }
     }
@@ -326,6 +399,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         error,
         loading,
         streaming,
+        regeneration,
+        regenerate,
+        highlightedMessage,
         sidebarOpen,
         setDraft,
         setError,

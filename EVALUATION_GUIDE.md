@@ -2,7 +2,7 @@
 
 ## Scope and verification honesty
 
-This is a complete single-user application implementation. The production entry point uses the real official OpenAI SDK and a configurable persistent MongoDB URI. Controlled AI responses exist only in automated test fixtures. No live OpenAI call was executed during implementation because no application API key was configured. A temporary real MongoDB process was used for API and browser verification; a user-managed persistent MongoDB deployment still needs configuration.
+This is a complete single-user application implementation. The production entry point uses the real official OpenAI SDK and a configurable persistent MongoDB URI. Controlled AI responses exist only in automated test fixtures. A live OpenAI request was subsequently attempted with a locally configured key; the upstream service returned `insufficient_quota` / `credit_balance_exhausted`, so successful live text generation remains unverified. A temporary real MongoDB process was used for API and browser verification; a user-managed persistent MongoDB deployment still needs configuration.
 
 ## Requirement mapping
 
@@ -81,13 +81,13 @@ The test database is disposable. For persistence beyond application/database res
 Executed locally:
 
 - Root TypeScript checks and both production builds.
-- 26 backend tests and 7 frontend stream-parser tests.
-- Chrome end-to-end checks for streaming state, multi-turn context, tone changes, reload persistence, history retrieval, deletion, failed draft restoration, cancellation and mobile viewport fit.
+- 39 backend tests (including 12 regeneration/search integration tests) and 7 frontend stream-parser tests.
+- 8 Chrome end-to-end tests covering existing chat flows plus regeneration success/failure/cancellation, refresh persistence, title/content search, matching-message navigation/highlighting, clear/no-results/error states and mobile search.
 - npm dependency audit after updating affected test dependencies: zero reported vulnerabilities.
 
 Not executed with live external services:
 
-- Real OpenAI key/model/billing connectivity or subjective style quality for the three tones.
+- Successful live OpenAI generation and subjective style quality for the three tones (the attempted request was blocked by exhausted API credits).
 - User-managed MongoDB/Atlas deployment, API-process restart against that persistent deployment, or production load testing.
 
 ### Manual acceptance checklist
@@ -114,6 +114,34 @@ Not executed with live external services:
 | 18  | Mobile usable                            | Chrome 390×844 viewport fit/sidebar passed                              |
 | 19  | Key remains backend-only                 | Source/API design reviewed; no key in client or chat payload            |
 | 20  | Multi-turn context                       | Passed backend context assertions and browser controlled provider       |
+
+## Additional feature evaluation
+
+### Regenerate AI response
+
+- **Source:** `client/src/components/ChatMessage.tsx`, `App.tsx`, `context/ChatContext.tsx`, `services/progressiveStream.ts`; `server/src/app.ts`, `validation.ts`, `services/repository.ts` and the existing AI adapter.
+- The circular-arrow action appears only on the latest completed assistant answer. A separate incremental preview preserves the original bubble until success. Request state disables overlapping actions; Stop and navigation abort the stream.
+- `POST /api/chat/regenerate` validates `{conversationId, messageId, tone, requestId?}`. The existing SSE handler and OpenAI adapter are shared with normal sends.
+- A database lease protects the snapshot. The server locates the target's original user prompt by its unchanged request ID and sends only the prefix through that prompt. The old answer and later messages never enter the regeneration context.
+- Success atomically replaces content, timestamp and tone of the same assistant message. User prompt, message ID, order and later entries stay intact. Failure/cancellation releases the lease without modifying messages. The browser reconciles canonical state if delivery fails after a database commit.
+- **Schema:** one backward-compatible optional `regenerationRequestId` field records the last successful regeneration UUID without overwriting the original prompt/answer request ID. No migration or extra collection is needed. The optional API UUID permits replay of that successful result; original answer versions are not retained.
+
+### Search conversation history
+
+- **Source:** `client/src/components/Sidebar.tsx`, `context/ChatContext.tsx`, `App.tsx`, `components/ChatMessage.tsx`, `styles.css`; `server/src/app.ts`, `validation.ts`, `services/repository.ts`.
+- `GET /api/conversations/search?q=keyword` is registered before `/:id`, validates a trimmed 1–100-character query and performs literal case-insensitive MongoDB matching on title and message content.
+- The aggregation escapes regex characters, limits results to 20, caps execution at 2 seconds, orders by activity then ID, and returns only title/tone/timestamps, a short matching snippet and stable message ID. Title-only results use a null message ID.
+- The sidebar debounces 300 ms, aborts stale requests, handles loading/errors/no results, and safely renders excerpts without raw HTML. Clear restores normal history. Selecting a result loads its persisted conversation, scrolls to the first matching message and highlights it, including on mobile.
+- **Schema:** search uses existing content and message IDs. No search index or schema migration is introduced. Regex substring queries may scan documents, so large datasets would need an indexed search design.
+
+### Demonstration and test coverage
+
+1. Generate an answer, change tone, and click **Regenerate response**. Confirm the old answer remains visible while the preview streams. After completion, refresh and show the replacement with the same number of messages.
+2. Stop a regeneration and demonstrate the original answer remains. With a controlled provider error, show the same preservation and error feedback.
+3. Start a fresh chat, refresh, and search for a phrase that appears only in an older stored message. Open its result and show the message highlight. Search for a title, then an unmatched phrase, and clear the query.
+4. Repeat search navigation with a mobile viewport. The sidebar closes and the matching bubble scrolls into view.
+
+`server/tests/features.integration.test.ts` exercises both endpoints against real temporary MongoDB with a controlled AI adapter. `e2e/features.spec.ts` covers the UI workflows against Express and MongoDB. Existing tests continue covering normal chat, tones, failures, context and streaming. Live OpenAI regeneration is still subject to the exhausted-credit limitation noted above; automated tests do not claim a successful live-provider response.
 
 ## Interview discussion prompts
 

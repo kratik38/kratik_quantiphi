@@ -1,4 +1,4 @@
-import { Check, Copy, Sparkles, UserRound } from "lucide-react";
+import { Check, Copy, Sparkles, UserRound, RotateCcw } from "lucide-react";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -7,13 +7,23 @@ import type { Message } from "../types";
 export function ChatMessage({
   message,
   streaming,
+  canRegenerate = false,
+  highlighted = false,
 }: {
   message: Message;
   streaming: boolean;
+  canRegenerate?: boolean;
+  highlighted?: boolean;
 }) {
   const [copied, setCopied] = useState(false),
     [copyError, setCopyError] = useState(false);
-  const { setDraft } = useChat();
+  const {
+    setDraft,
+    regenerate,
+    streaming: requestActive,
+    loading,
+    regeneration,
+  } = useChat();
   const assistant = message.role === "assistant";
   const copy = async () => {
     try {
@@ -26,7 +36,11 @@ export function ChatMessage({
     }
   };
   return (
-    <article className={`message-row ${assistant ? "assistant" : "user"}`}>
+    <article
+      id={message._id ? `message-${message._id}` : undefined}
+      data-message-id={message._id}
+      className={`message-row ${assistant ? "assistant" : "user"} ${highlighted ? "message-highlight" : ""}`}
+    >
       <div className="message-avatar">
         {assistant ? <Sparkles size={17} /> : <UserRound size={16} />}
       </div>
@@ -84,18 +98,38 @@ export function ChatMessage({
             </button>
           )}
         {assistant && message.content && !streaming && (
-          <button
-            className="copy-button"
-            onClick={() => void copy()}
-            aria-label="Copy response"
-          >
-            {copied ? <Check size={13} /> : <Copy size={13} />}{" "}
-            {copyError
-              ? "Copy unavailable"
-              : copied
-                ? "Copied"
-                : "Copy response"}
-          </button>
+          <div className="message-actions">
+            <button
+              className="copy-button"
+              onClick={() => void copy()}
+              aria-label="Copy response"
+            >
+              {copied ? <Check size={13} /> : <Copy size={13} />}{" "}
+              {copyError
+                ? "Copy unavailable"
+                : copied
+                  ? "Copied"
+                  : "Copy response"}
+            </button>
+            {canRegenerate && message._id && (
+              <button
+                className="copy-button regenerate-button"
+                aria-label="Regenerate response"
+                disabled={requestActive || loading}
+                onClick={() => void regenerate(message._id!)}
+              >
+                <RotateCcw
+                  size={13}
+                  className={
+                    regeneration?.messageId === message._id ? "spinning" : ""
+                  }
+                />
+                {regeneration?.messageId === message._id
+                  ? "Regenerating…"
+                  : "Regenerate response"}
+              </button>
+            )}
+          </div>
         )}
         {!assistant &&
           (message.status === "failed" || message.status === "cancelled") && (

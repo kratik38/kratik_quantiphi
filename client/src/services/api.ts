@@ -24,8 +24,9 @@ export async function streamChat(
   body: object,
   signal: AbortSignal,
   onEvent: (event: StreamEvent) => void,
+  path = "/chat/stream",
 ) {
-  const response = await fetch(`${base}/api/chat/stream`, {
+  const response = await fetch(`${base}/api${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

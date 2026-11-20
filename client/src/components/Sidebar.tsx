@@ -5,8 +5,12 @@ import {
   Trash2,
   Sparkles,
   X,
+  Search,
+  LoaderCircle,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { api } from "../services/api";
+import type { SearchResult } from "../types";
 import { useChat } from "../context/ChatContext";
 export function Sidebar() {
   const {
@@ -21,6 +25,49 @@ export function Sidebar() {
   } = useChat();
   const [deleting, setDeleting] = useState<string | null>(null);
   const dialog = useRef<HTMLElement>(null);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const search = query.trim();
+  useEffect(() => {
+    const abort = new AbortController();
+    setResults([]);
+    setSearchError("");
+    if (!search) {
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await api<{ results: SearchResult[] }>(
+          `/conversations/search?q=${encodeURIComponent(search)}`,
+          { signal: abort.signal },
+        );
+        if (!abort.signal.aborted) setResults(response.results);
+      } catch (e) {
+        if (!abort.signal.aborted) setSearchError((e as Error).message);
+      } finally {
+        if (!abort.signal.aborted) setSearching(false);
+      }
+    }, 300);
+    return () => {
+      clearTimeout(timer);
+      abort.abort();
+    };
+  }, [search, conversations]);
+  const matchingText = (text: string) => {
+    const index = text.toLocaleLowerCase().indexOf(search.toLocaleLowerCase());
+    if (!search || index < 0) return text;
+    return (
+      <>
+        {text.slice(0, index)}
+        <mark>{text.slice(index, index + search.length)}</mark>
+        {text.slice(index + search.length)}
+      </>
+    );
+  };
   useEffect(() => {
     if (!deleting) return;
     const previous = document.activeElement as HTMLElement | null;
@@ -87,48 +134,106 @@ export function Sidebar() {
         <button className="new-chat" onClick={newChat}>
           <Plus size={18} /> New conversation
         </button>
+        <div className="history-search">
+          <Search size={15} aria-hidden="true" />
+          <input
+            type="search"
+            aria-label="Search conversations"
+            placeholder="Search conversations…"
+            value={query}
+            maxLength={100}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {query && (
+            <button
+              className="icon-button"
+              aria-label="Clear search"
+              onClick={() => setQuery("")}
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
         <div className="history-heading">
-          YOUR CONVERSATIONS <span>{conversations.length}</span>
+          {search ? "SEARCH RESULTS" : "YOUR CONVERSATIONS"}{" "}
+          <span>{search ? results.length : conversations.length}</span>
         </div>
         <nav className="history-list">
-          {conversations.length === 0 && (
+          {search && searching && (
+            <div className="search-state" role="status">
+              <LoaderCircle size={16} className="spinning" />
+              Searching history…
+            </div>
+          )}
+          {search && searchError && (
+            <p className="search-error" role="alert">
+              {searchError}
+            </p>
+          )}
+          {search && !searching && !searchError && results.length === 0 && (
+            <p className="search-state">No matching conversations</p>
+          )}
+          {search &&
+            results.map((result) => (
+              <div
+                key={result._id}
+                className={`history-item search-result ${active?._id === result._id ? "active" : ""}`}
+              >
+                <button
+                  className="history-select"
+                  onClick={() =>
+                    void select(result._id, result.messageId || undefined)
+                  }
+                >
+                  <MessageSquare size={16} />
+                  <span>
+                    <strong>{matchingText(result.title)}</strong>
+                    <small className="search-snippet">
+                      {matchingText(result.snippet)}
+                    </small>
+                  </span>
+                </button>
+              </div>
+            ))}
+          {!search && conversations.length === 0 && (
             <div className="history-empty">
               <MessageSquare size={25} />
               <p>A little space for big ideas.</p>
               <span>Your conversations will appear here.</span>
             </div>
           )}
-          {conversations.map((item) => (
-            <div
-              key={item._id}
-              className={`history-item ${active?._id === item._id ? "active" : ""}`}
-            >
-              <button
-                className="history-select"
-                onClick={() => void select(item._id)}
+          {!search &&
+            conversations.map((item) => (
+              <div
+                key={item._id}
+                className={`history-item ${active?._id === item._id ? "active" : ""}`}
               >
-                <MessageSquare size={16} />
-                <span>
-                  {item.title}
-                  <small>
-                    {new Date(item.updatedAt).toLocaleDateString(undefined, {
-                      month: "short",
-                      day: "numeric",
-                    })}
-                  </small>
-                </span>
-              </button>
-              <button
-                className="icon-button delete-chat"
-                aria-label={`Delete ${item.title}`}
-                title="Delete conversation"
-                disabled={streaming && active?._id === item._id}
-                onClick={() => setDeleting(item._id)}
-              >
-                <Trash2 size={15} />
-              </button>
-            </div>
-          ))}
+                <button
+                  className="history-select"
+                  onClick={() => void select(item._id)}
+                >
+                  <MessageSquare size={16} />
+                  <span>
+                    {item.title}
+                    <small>
+                      {new Date(item.updatedAt).toLocaleDateString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                      })}
+                    </small>
+                  </span>
+                </button>
+                <button
+                  className="icon-button delete-chat"
+                  aria-label={`Delete ${item.title}`}
+                  title="Delete conversation"
+                  disabled={streaming && active?._id === item._id}
+                  onClick={() => setDeleting(item._id)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ))}
         </nav>
         <div className="sidebar-footer">
           <span className="status-dot" />

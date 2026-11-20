@@ -120,6 +120,17 @@ describe("official SDK request construction", () => {
 });
 
 describe("bounded context and safe provider errors", () => {
+  it("reports exhausted credits even when the provider omits an HTTP status", () => {
+    const failure = safeAIError({
+      code: "credit_balance_exhausted",
+      type: "insufficient_quota",
+      message: "sensitive provider detail",
+    });
+    expect(failure).toMatchObject({ status: 429, code: "AI_QUOTA_EXHAUSTED" });
+    expect(failure.message).toContain("billing");
+    expect(failure.message).not.toContain("sensitive provider detail");
+  });
+
   it("omits failed/cancelled turns and bounds the context to recent messages", () => {
     const history = Array.from({ length: 60 }, (_, i) =>
       message(i % 2 ? "assistant" : "user", String(i)),

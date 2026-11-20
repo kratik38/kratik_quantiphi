@@ -5,8 +5,10 @@ import {
   type Conversation,
   type ConversationSummary,
   type Tone,
+  type SearchResult,
+  type Message,
 } from "../types.js";
-import type { StreamInput } from "../validation.js";
+import type { StreamInput, RegenerateInput } from "../validation.js";
 function plain(doc: unknown): Conversation {
   const value = JSON.parse(JSON.stringify(doc));
   delete value.activeRequest;
@@ -18,10 +20,21 @@ export interface BeginResult {
   conversation: Conversation;
   replay: boolean;
   assistantMessageId: string;
+  context?: Message[];
 }
 export interface ConversationRepository {
   isReady(): boolean;
   list(): Promise<ConversationSummary[]>;
+  search(query: string): Promise<SearchResult[]>;
+  beginRegeneration(input: RegenerateInput): Promise<BeginResult>;
+  completeRegeneration(
+    id: string,
+    requestId: string,
+    messageId: string,
+    content: string,
+    tone: Tone,
+  ): Promise<Conversation>;
+  failRegeneration(id: string, requestId: string): Promise<Conversation>;
   create(tone: Tone): Promise<Conversation>;
   get(id: string): Promise<Conversation>;
   update(
@@ -72,6 +85,224 @@ export class MongoConversationRepository implements ConversationRepository {
         .sort({ updatedAt: -1 })
         .lean()
     ).map((d) => plain(d));
+  }
+  async search(query: string): Promise<SearchResult[]> {
+    // Literal matching avoids regex injection. Bounds, a result cap and a query deadline
+    // keep this single-user search predictable; histories never leave MongoDB in bulk.
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const expression = new RegExp(escaped, "i");
+    const matches = await ConversationModel.aggregate([
+      {
+        $match: {
+          $or: [{ title: expression }, { "messages.content": expression }],
+        },
+      },
+      { $sort: { updatedAt: -1, _id: -1 } },
+      { $limit: 20 },
+      {
+        $project: {
+          title: 1,
+          tone: 1,
+          createdAt: 1,
+          updatedAt: 1,
+          match: {
+            $arrayElemAt: [
+              {
+                $filter: {
+                  input: "$messages",
+                  as: "message",
+                  cond: {
+                    $regexMatch: {
+                      input: "$$message.content",
+                      regex: expression,
+                    },
+                  },
+                },
+              },
+              0,
+            ],
+          },
+        },
+      },
+      {
+        $project: {
+          title: 1,
+          tone: 1,
+          createdAt: 1,
+          updatedAt: 1,
+          messageId: { $ifNull: ["$match._id", null] },
+          snippet: {
+            $let: {
+              vars: { source: { $ifNull: ["$match.content", "$title"] } },
+              in: {
+                $substrCP: [
+                  "$$source",
+                  {
+                    $max: [
+                      0,
+                      {
+                        $subtract: [
+                          {
+                            $let: {
+                              vars: {
+                                location: {
+                                  $regexFind: {
+                                    input: "$$source",
+                                    regex: expression,
+                                  },
+                                },
+                              },
+                              in: "$$location.idx",
+                            },
+                          },
+                          55,
+                        ],
+                      },
+                    ],
+                  },
+                  180,
+                ],
+              },
+            },
+          },
+        },
+      },
+    ]).option({ maxTimeMS: 2000 });
+    return JSON.parse(JSON.stringify(matches)) as SearchResult[];
+  }
+  async beginRegeneration(input: RegenerateInput): Promise<BeginResult> {
+    await this.recoverExpired(input.conversationId);
+    const doc = await ConversationModel.findOneAndUpdate(
+      {
+        _id: input.conversationId,
+        activeRequest: null,
+      },
+      {
+        $set: {
+          activeRequest: input.requestId,
+          leaseUntil: new Date(Date.now() + 180000),
+        },
+      },
+      { new: true },
+    );
+    if (!doc) {
+      await this.get(input.conversationId);
+      throw new AppError(
+        409,
+        "CONVERSATION_BUSY",
+        "A response is already being generated in this conversation.",
+      );
+    }
+    try {
+      const conversation = plain(doc);
+      const index = conversation.messages.findIndex(
+        (message) =>
+          message._id === input.messageId &&
+          message.role === "assistant" &&
+          message.status === "completed",
+      );
+      const latest = [...conversation.messages]
+        .reverse()
+        .find(
+          (message) =>
+            message.role === "assistant" && message.status === "completed",
+        );
+      if (index < 0)
+        throw new AppError(
+          404,
+          "MESSAGE_NOT_FOUND",
+          "Completed assistant response not found.",
+        );
+      if (latest?._id !== input.messageId)
+        throw new AppError(
+          409,
+          "REGENERATION_NOT_LATEST",
+          "Only the latest completed assistant response can be regenerated.",
+        );
+      const target = conversation.messages[index]!;
+      const promptIndex = conversation.messages.findIndex(
+        (message, messageIndex) =>
+          messageIndex < index &&
+          message.role === "user" &&
+          message.requestId === target.requestId,
+      );
+      if (promptIndex < 0)
+        throw new AppError(
+          409,
+          "PROMPT_NOT_FOUND",
+          "The original user prompt could not be found.",
+        );
+      const replay = target.regenerationRequestId === input.requestId;
+      if (replay && target.tone !== input.tone)
+        throw new AppError(
+          409,
+          "REQUEST_CONFLICT",
+          "This regeneration request ID was already used with another tone.",
+        );
+      if (replay)
+        await ConversationModel.updateOne(
+          { _id: doc._id, activeRequest: input.requestId },
+          { $set: { activeRequest: null, leaseUntil: null } },
+        );
+      return {
+        conversation: await this.get(input.conversationId),
+        assistantMessageId: input.messageId,
+        replay,
+        context: conversation.messages.slice(0, promptIndex + 1),
+      };
+    } catch (error) {
+      await ConversationModel.updateOne(
+        { _id: doc._id, activeRequest: input.requestId },
+        { $set: { activeRequest: null, leaseUntil: null } },
+      );
+      throw error;
+    }
+  }
+  async completeRegeneration(
+    id: string,
+    requestId: string,
+    messageId: string,
+    content: string,
+    tone: Tone,
+  ) {
+    const result = await ConversationModel.updateOne(
+      {
+        _id: id,
+        activeRequest: requestId,
+        messages: {
+          $elemMatch: {
+            _id: new mongoose.Types.ObjectId(messageId),
+            role: "assistant",
+            status: "completed",
+          },
+        },
+      },
+      {
+        $set: {
+          "messages.$.content": content,
+          "messages.$.timestamp": new Date(),
+          "messages.$.tone": tone,
+          "messages.$.regenerationRequestId": requestId,
+          tone,
+          activeRequest: null,
+          leaseUntil: null,
+        },
+      },
+    );
+    if (result.modifiedCount !== 1)
+      throw new AppError(
+        409,
+        "LEASE_LOST",
+        "The regenerated response could not be saved. Reload and retry.",
+      );
+    return this.get(id);
+  }
+  async failRegeneration(id: string, requestId: string) {
+    await ConversationModel.updateOne(
+      { _id: id, activeRequest: requestId },
+      { $set: { activeRequest: null, leaseUntil: null } },
+    );
+    return this.get(id);
   }
   async create(tone: Tone) {
     return plain(await ConversationModel.create({ tone }));

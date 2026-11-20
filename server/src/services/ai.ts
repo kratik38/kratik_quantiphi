@@ -90,7 +90,23 @@ export class OpenAIService implements AIService {
 }
 export function safeAIError(error: unknown): AppError {
   if (error instanceof AppError) return error;
-  const status = (error as { status?: number })?.status;
+  const providerError = error as {
+    status?: number;
+    code?: string;
+    type?: string;
+  };
+  const status = providerError?.status;
+  if (
+    providerError?.type === "insufficient_quota" ||
+    ["insufficient_quota", "credit_balance_exhausted"].includes(
+      providerError?.code || "",
+    )
+  )
+    return new AppError(
+      429,
+      "AI_QUOTA_EXHAUSTED",
+      "The AI provider reports exhausted API credits. Check your OpenAI project billing and quota before retrying.",
+    );
   if (status === 401 || status === 403)
     return new AppError(
       502,

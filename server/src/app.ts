@@ -1,4 +1,5 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
 import cors from "cors";
 import helmet from "helmet";
 import { rateLimit } from "express-rate-limit";
@@ -9,6 +10,9 @@ import {
   createConversationSchema,
   idSchema,
   streamSchema,
+  regenerateSchema,
+  searchSchema,
+  type StreamInput,
   updateConversationSchema,
 } from "./validation.js";
 import {
@@ -78,6 +82,10 @@ export function createApp(dependencies: AppDependencies = {}) {
     const { tone } = createConversationSchema.parse(req.body ?? {});
     res.status(201).json({ conversation: await repository.create(tone) });
   });
+  app.get("/api/conversations/search", async (req, res) => {
+    const { q } = searchSchema.parse(req.query);
+    res.json({ results: await repository.search(q) });
+  });
   app.get("/api/conversations/:id", async (req, res) => {
     res.json({
       conversation: await repository.get(idSchema.parse(req.params.id)),
@@ -96,7 +104,7 @@ export function createApp(dependencies: AppDependencies = {}) {
     res.sendStatus(204);
   });
   app.post(
-    "/api/chat/stream",
+    ["/api/chat/stream", "/api/chat/regenerate"],
     rateLimit({
       windowMs: 60000,
       limit: 20,
@@ -110,7 +118,14 @@ export function createApp(dependencies: AppDependencies = {}) {
       },
     }),
     async (req, res, next) => {
-      const input = streamSchema.parse(req.body);
+      const regeneration =
+        req.path.replace(/\/$/, "") === "/api/chat/regenerate"
+          ? regenerateSchema.parse(req.body)
+          : null;
+      const regenerationInput = regeneration
+        ? { ...regeneration, requestId: regeneration.requestId ?? randomUUID() }
+        : null;
+      const input = regenerationInput ?? streamSchema.parse(req.body);
       const controller = new AbortController();
       let timedOut = false;
       let accepted = false;
@@ -129,7 +144,9 @@ export function createApp(dependencies: AppDependencies = {}) {
       };
       let heartbeat: ReturnType<typeof setInterval> | undefined;
       try {
-        const started = await repository.begin(input);
+        const started = regenerationInput
+          ? await repository.beginRegeneration(regenerationInput)
+          : await repository.begin(input as StreamInput);
         accepted = true;
         committed = started.replay;
         if (controller.signal.aborted)
@@ -144,14 +161,17 @@ export function createApp(dependencies: AppDependencies = {}) {
         heartbeat = setInterval(() => {
           if (!res.destroyed) res.write(": heartbeat\n\n");
         }, 15000);
-        const userMessage = started.conversation.messages.find(
-          (m) => m.role === "user" && m.requestId === input.requestId,
-        );
+        const userMessage =
+          started.context?.at(-1) ??
+          started.conversation.messages.find(
+            (m) => m.role === "user" && m.requestId === input.requestId,
+          );
         emit("start", {
           conversationId: input.conversationId,
           requestId: input.requestId,
           userMessage,
           assistantMessageId: started.assistantMessageId,
+          regenerating: Boolean(regenerationInput),
         });
         if (started.replay) {
           committed = true;
@@ -160,7 +180,7 @@ export function createApp(dependencies: AppDependencies = {}) {
         }
         let response = "";
         for await (const text of ai.generate(
-          started.conversation.messages,
+          started.context ?? started.conversation.messages,
           input.tone,
           controller.signal,
         )) {
@@ -184,13 +204,21 @@ export function createApp(dependencies: AppDependencies = {}) {
             "The AI returned no text. Please retry your message.",
           );
         saving = true;
-        const conversation = await repository.complete(
-          input.conversationId,
-          input.requestId,
-          started.assistantMessageId,
-          response,
-          input.tone,
-        );
+        const conversation = regenerationInput
+          ? await repository.completeRegeneration(
+              input.conversationId,
+              input.requestId,
+              started.assistantMessageId,
+              response,
+              input.tone,
+            )
+          : await repository.complete(
+              input.conversationId,
+              input.requestId,
+              started.assistantMessageId,
+              response,
+              input.tone,
+            );
         committed = true;
         emit("done", { conversation });
       } catch (error) {
@@ -212,11 +240,18 @@ export function createApp(dependencies: AppDependencies = {}) {
         let conversation;
         if (accepted && !committed)
           try {
-            conversation = await repository.fail(
-              input.conversationId,
-              input.requestId,
-              controller.signal.aborted && !timedOut ? "cancelled" : "failed",
-            );
+            conversation = regenerationInput
+              ? await repository.failRegeneration(
+                  input.conversationId,
+                  input.requestId,
+                )
+              : await repository.fail(
+                  input.conversationId,
+                  input.requestId,
+                  controller.signal.aborted && !timedOut
+                    ? "cancelled"
+                    : "failed",
+                );
           } catch {
             /* The database may have disconnected; the lease recovers after expiry. */
           }

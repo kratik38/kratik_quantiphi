@@ -21,3 +21,17 @@ export interface StreamEvent {
   event: string;
   data: Record<string, unknown>;
 }
+
+export interface SearchResult {
+  _id: string;
+  title: string;
+  updatedAt: string;
+  snippet: string;
+  messageId: string | null;
+}
+export interface RegenerationPreview {
+  messageId: string;
+  content: string;
+  tone: Tone;
+  timestamp: string;
+}

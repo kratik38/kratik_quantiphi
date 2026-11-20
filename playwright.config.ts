@@ -6,7 +6,7 @@ export default defineConfig({
   timeout: 30000,
   reporter: "list",
   use: {
-    baseURL: "http://localhost:5173",
+    baseURL: "http://localhost:5187",
     headless: true,
     channel: "chrome",
     screenshot: "only-on-failure",
@@ -19,8 +19,9 @@ export default defineConfig({
       timeout: 120000,
     },
     {
-      command: "VITE_API_BASE_URL=http://127.0.0.1:5017 npm run dev -w client",
-      url: "http://localhost:5173",
+      command:
+        "VITE_API_BASE_URL=http://127.0.0.1:5017 npm run dev -w client -- --port 5187",
+      url: "http://localhost:5187",
       timeout: 30000,
     },
   ],

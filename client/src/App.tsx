@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowDown,
@@ -46,6 +46,8 @@ export default function App() {
     setError,
     loading,
     streaming,
+    regeneration,
+    highlightedMessage,
     sidebarOpen,
     setSidebarOpen,
     setDraft,
@@ -65,7 +67,20 @@ export default function App() {
     setNearBottom(true);
     bottom.current?.scrollIntoView();
   }, [active?._id]);
-  const lastContent = active?.messages.at(-1)?.content;
+  useEffect(() => {
+    if (!highlightedMessage || loading) return;
+    setNearBottom(false);
+    const frame = requestAnimationFrame(() =>
+      document
+        .getElementById(`message-${highlightedMessage.id}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [highlightedMessage, active?._id, loading]);
+  const latestAssistantId = [...(active?.messages || [])]
+    .reverse()
+    .find((m) => m.role === "assistant" && m.status === "completed")?._id;
+  const lastContent = regeneration?.content ?? active?.messages.at(-1)?.content;
   useEffect(() => {
     if (nearBottom) bottom.current?.scrollIntoView({ behavior: "instant" });
   }, [lastContent, active?.messages.length, nearBottom]);
@@ -200,11 +215,34 @@ export default function App() {
           ) : (
             <div className="messages" aria-live="off" aria-label="Messages">
               {active?.messages.map((message, index) => (
-                <ChatMessage
-                  key={message._id || index}
-                  message={message}
-                  streaming={streaming && message._id === "streaming"}
-                />
+                <Fragment key={message._id || index}>
+                  <ChatMessage
+                    message={message}
+                    streaming={streaming && message._id === "streaming"}
+                    canRegenerate={message._id === latestAssistantId}
+                    highlighted={message._id === highlightedMessage?.id}
+                  />
+                  {regeneration && regeneration.messageId === message._id && (
+                    <section
+                      className="regeneration-preview"
+                      aria-label="Regenerated response preview"
+                    >
+                      <p className="preview-label">
+                        Regenerating · original response kept until complete
+                      </p>
+                      <ChatMessage
+                        message={{
+                          _id: "regeneration-preview",
+                          role: "assistant",
+                          content: regeneration.content,
+                          timestamp: regeneration.timestamp,
+                          tone: regeneration.tone,
+                        }}
+                        streaming
+                      />
+                    </section>
+                  )}
+                </Fragment>
               ))}
               <div ref={bottom} />
             </div>
